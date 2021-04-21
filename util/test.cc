@@ -35,14 +35,14 @@ void SingleInSingleOut() {
 }
 
 void MultipleWriters() {
-  const unsigned kCount = 100;
+  const unsigned kCount = 2000;
+  const unsigned kNumThreads = 4;
   PCQueue<unsigned> queue(13);
   auto writer = [&queue, kCount]() {
     for (unsigned i = 0; i < kCount; ++i) {
       queue.Produce(i);
     }
   };
-  const unsigned kNumThreads = 3;
   std::vector<std::thread> threads;
   for (unsigned i = 0; i < kNumThreads; ++i) {
     threads.emplace_back(writer);
@@ -52,9 +52,11 @@ void MultipleWriters() {
     unsigned got = queue.Consume();
     UTIL_ABORT_IF(got >= kCount, Exception, "Index " << got << " too high.");
     seen[got]++;
+    // Since each thread generates in order, counts should be monotonically non-increasing.
+    UTIL_ABORT_IF(got && seen[got] > seen[got - 1], Exception, "Queue is not keeping order.");
   }
   for (unsigned i = 0; i < kCount; ++i) {
-    UTIL_ABORT_IF(seen[i] != kNumThreads, Exception, "Expected to see values from exactly two threads but got " << seen[i] << " of " << i);
+    UTIL_ABORT_IF(seen[i] != kNumThreads, Exception, "Expected to see values from exactly " << kNumThreads << " threads but got " << seen[i] << " of " << i);
   }
   for (std::thread &t : threads) {
     t.join();
