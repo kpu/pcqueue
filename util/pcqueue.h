@@ -7,19 +7,15 @@
 #include <memory>
 #include <mutex>
 
-#include <stdlib.h>
-
 #ifdef __APPLE__
 #include <mach/semaphore.h>
 #include <mach/task.h>
 #include <mach/mach_traps.h>
 #include <mach/mach.h>
-#elif defined(__linux)
-#include <semaphore.h>
 #elif defined(_WIN32) || defined(_WIN64)
 #include <windows.h>
 #else
-#include <boost/interprocess/sync/interprocess_semaphore.hpp>
+#include <semaphore.h>
 #endif
 
 #define UTIL_ABORT(type, string) std::cerr << string << std::endl; abort()
@@ -58,11 +54,41 @@ class Semaphore {
     task_t task_;
 };
 
-inline void WaitSemaphore(Semaphore &semaphore) {
-  semaphore.wait();
-}
+#elif defined(_WIN32) || defined(_WIN64)
 
-#elif defined(__linux)
+class Semaphore {
+  public:
+    explicit Semaphore(LONG value) : sem_(CreateSemaphoreA(NULL, value, 2147483647, NULL)) {
+      UTIL_ABORT_IF(!sem_, Exception, "Could not CreateSemaphore " << GetLastError());
+    }
+
+    ~Semaphore() {
+      CloseHandle(sem_);
+    }
+
+
+    void wait() {
+      switch (WaitForSingleObject(sem_, INFINITE)) {
+        case WAIT_OBJECT_0:
+          return;
+        case WAIT_ABANDONED:
+          UTIL_ABORT(Exception, "A semaphore can't be abandoned, confused by Windows");
+        case WAIT_TIMEOUT:
+          UTIL_ABORT(Exception, "Timeout on an infinite wait?!");
+        case WAIT_FAILED:
+          UTIL_ABORT(Exception, "Waiting on Semaphore failed " << GetLastError());
+      }
+    }
+
+    void post() {
+      UTIL_ABORT_IF(!ReleaseSemaphore(sem_, 1, NULL), Exception, "Failed to release Semaphore " << GetLastError());
+    }
+
+  private:
+    HANDLE sem_;
+};
+
+#else // Linux and BSD
 
 class Semaphore {
   public:
@@ -91,67 +117,6 @@ class Semaphore {
     sem_t sem_;
 };
 
-inline void WaitSemaphore(Semaphore &semaphore) {
-  semaphore.wait();
-}
-
-#elif defined(_WIN32) || defined(_WIN64)
-
-class Semaphore {
-  public:
-    explicit Semaphore(LONG value) : sem_(CreateSemaphoreA(NULL, value, 2147483647, NULL)) {
-      UTIL_ABORT_IF(!sem_, Exception, "Could not CreateSemaphore " << GetLastError());
-    }
-
-    ~Semaphore() {
-      CloseHandle(sem_);
-    }
-
-
-    void wait() {
-      while (true) {
-        switch (WaitForSingleObject(sem_, INFINITE)) {
-          case WAIT_OBJECT_0:
-            return;
-          case WAIT_ABANDONED:
-            UTIL_ABORT(Exception, "A semaphore can't be abandoned, confused by Windows");
-          case WAIT_TIMEOUT:
-            continue;
-          case WAIT_FAILED:
-            UTIL_ABORT(Exception, "Waiting on Semaphore failed " << GetLastError());
-        }
-      }
-    }
-
-    void post() {
-      UTIL_ABORT_IF(!ReleaseSemaphore(sem_, 1, NULL), Exception, "Failed to release Semaphore " << GetLastError());
-    }
-
-  private:
-    HANDLE sem_;
-};
-
-inline void WaitSemaphore(Semaphore &semaphore) {
-  semaphore.wait();
-}
-
-#else
-typedef boost::interprocess::interprocess_semaphore Semaphore;
-
-inline void WaitSemaphore (Semaphore &on) {
-  while (1) {
-    try {
-      on.wait();
-      break;
-    }
-    catch (boost::interprocess::interprocess_exception &e) {
-      if (e.get_native_error() != EINTR) {
-        throw;
-      }
-    }
-  }
-}
-
 #endif // Cases for semaphore support
 
 /**
@@ -172,7 +137,7 @@ template <class T> class PCQueue {
 
   // Add a value to the queue.
   void Produce(const T &val) {
-    WaitSemaphore(empty_);
+    empty_.wait();
     {
       std::lock_guard<std::mutex> produce_lock(produce_at_mutex_);
       try {
@@ -188,7 +153,7 @@ template <class T> class PCQueue {
 
   // Add a value to the queue, but swap it into place.
   void ProduceSwap(T &val) {
-    WaitSemaphore(empty_);
+    empty_.wait();
     {
       std::lock_guard<std::mutex> produce_lock(produce_at_mutex_);
       try {
@@ -205,7 +170,7 @@ template <class T> class PCQueue {
 
   // Consume a value, assigning it to out.
   T& Consume(T &out) {
-    WaitSemaphore(used_);
+    used_.wait();
     {
       std::lock_guard<std::mutex> consume_lock(consume_at_mutex_);
       try {
@@ -222,7 +187,7 @@ template <class T> class PCQueue {
 
   // Consume a value, swapping it to out.
   T& ConsumeSwap(T &out) {
-    WaitSemaphore(used_);
+    used_.wait();
     {
       std::lock_guard<std::mutex> consume_lock(consume_at_mutex_);
       try {
@@ -293,7 +258,7 @@ template <class T> class UnboundedSingleQueue {
     }
 
     T& Consume(T &out) {
-      WaitSemaphore(valid_);
+      valid_.wait();
       if (reading_current_ == reading_end_) {
         SetReading(reading_->next);
       }
